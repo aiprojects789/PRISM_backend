@@ -15,7 +15,24 @@ recommendation_engine = RecommendationEngine()
 async def generate_recommendations(
     query: RecommendationQuery, current_user: Any = Depends(get_current_user)
 ):
-    """Generate personalized recommendations based on user's digital twin"""
+    """
+    Generates personalized recommendations for the authenticated user based on their digital profile.
+
+    This endpoint retrieves the user's profile from Firestore and uses it to generate context-aware
+    recommendations tailored to a specific category and optional search query. The generated
+    recommendations are also stored in Firestore for historical tracking.
+
+    Args:
+        query (RecommendationQuery): The category and optional search query for recommendation generation.
+        current_user (Any): The authenticated user's ID, extracted from the JWT access token.
+
+    Returns:
+        dict: A dictionary containing the recommendation ID, input parameters, and a list of generated recommendations.
+
+    Raises:
+        HTTPException (404): If the user's profile does not exist in Firestore.
+        HTTPException (500): If any internal error occurs during the recommendation generation or storage process.
+    """
     try:
         # Get user profile from Firestore
         db = get_firestore_client()
@@ -62,7 +79,26 @@ async def generate_recommendations(
 
 @router.get("/history")
 async def get_recommendation_history(current_user: Any = Depends(get_current_user)):
-    """Get user's recommendation history"""
+    """
+    Retrieves the recommendation history for the authenticated user.
+
+    This endpoint queries the Firestore 'recommendations' collection for records
+    associated with the current user, returning a list of all past recommendation
+    requests including their category, query, and creation timestamp.
+
+    Args:
+        current_user (Any): The authenticated user's ID extracted from the JWT token.
+
+    Returns:
+        dict: A dictionary containing a list of historical recommendation entries, each with:
+            - recommendation_id (str): Unique Firestore document ID for the recommendation.
+            - category (str): The category of the recommendation.
+            - query (str): The search query used (if any).
+            - created_at (datetime): Timestamp of when the recommendation was created.
+
+    Raises:
+        HTTPException (500): If an internal error occurs while fetching data from Firestore.
+    """
     try:
         db = get_firestore_client()
         recommendations = (
@@ -96,7 +132,30 @@ async def get_recommendation_history(current_user: Any = Depends(get_current_use
 async def get_recommendation_details(
     recommendation_id: str, current_user: Any = Depends(get_current_user)
 ):
-    """Get details of a specific recommendation"""
+    """
+    Retrieves detailed information about a specific recommendation for the authenticated user.
+
+    This endpoint fetches a recommendation document from Firestore by its ID and ensures
+    that the requesting user is authorized to access it. If the document exists and belongs
+    to the user, detailed information about the recommendation is returned.
+
+    Args:
+        recommendation_id (str): The unique Firestore document ID for the recommendation.
+        current_user (Any): The authenticated user's ID extracted from the JWT token.
+
+    Returns:
+        dict: A dictionary containing:
+            - recommendation_id (str): The document ID.
+            - category (str): The category of the recommendation.
+            - query (str): The original query (if any).
+            - recommendations (list): The list of generated recommendations.
+            - created_at (datetime): The timestamp when the recommendation was created.
+
+    Raises:
+        HTTPException (404): If the recommendation does not exist.
+        HTTPException (403): If the user does not have permission to view this recommendation.
+        HTTPException (500): If an internal error occurs while accessing Firestore.
+    """
     try:
         db = get_firestore_client()
         rec_doc = db.collection("recommendations").document(recommendation_id).get()
@@ -132,7 +191,28 @@ async def get_recommendation_details(
 
 @router.get("/categories")
 async def get_recommendation_categories():
-    """Get list of available recommendation categories"""
+    """
+    Retrieves a predefined list of available recommendation categories.
+
+    This endpoint returns a static list of categories that users can choose from when
+    generating personalized recommendations. Each category includes an ID, a display name,
+    and an icon identifier that can be used in the frontend UI.
+
+    Returns:
+        dict: A dictionary containing a list of category objects, each with:
+            - id (str): The unique identifier for the category.
+            - name (str): A user-friendly name for the category.
+            - icon (str): An icon name representing the category (e.g., for use with FontAwesome).
+
+    Example Response:
+        {
+            "categories": [
+                {"id": "movies", "name": "Movies & TV Shows", "icon": "film"},
+                {"id": "books", "name": "Books & Reading", "icon": "book"},
+                ...
+            ]
+        }
+    """
     # You can expand this list based on your application needs
     categories = [
         {"id": "movies", "name": "Movies & TV Shows", "icon": "film"},
