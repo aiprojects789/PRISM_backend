@@ -8,8 +8,12 @@ from pydantic import BaseModel
 from app.core.config import get_settings
 from firebase_admin import auth
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
 
 class TokenData(BaseModel):
     user_id: Optional[str] = None
@@ -48,14 +52,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         if user_id is None:
             raise credentials_exception
         token_data = TokenData(user_id=user_id)
+        return token_data.user_id
     except JWTError:
-        raise credentials_exception
-    
-    try:
-        # Verify with Firebase Auth
-        user = auth.get_user(token_data.user_id)
-        return user
-    except Exception:
         raise credentials_exception
 
 def verify_firebase_token(id_token):
