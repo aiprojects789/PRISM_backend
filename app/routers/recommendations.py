@@ -71,10 +71,11 @@ async def generate_recommendations(
         }
 
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate recommendations: {str(e)}",
-        )
+        return e
+        # raise HTTPException(
+        #     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        #     detail=f"Failed to generate recommendations: {str(e)}",
+        # )
 
 
 @router.get("/history")
