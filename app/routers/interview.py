@@ -7,6 +7,7 @@ from app.core.firebase import get_firestore_client
 from typing import Dict, Any, List
 import uuid
 from datetime import datetime
+from app.utils.utils import convert_firestore_timestamp_to_iso, clean_session_data 
 
 router = APIRouter()
 interview_agent = InterviewAgent()
@@ -119,7 +120,7 @@ async def answer_question(
                 detail="Interview session not found",
             )
 
-        session = session_doc.to_dict()
+        session = clean_session_data(session_doc.to_dict())
 
         # Verify user owns this session
         if session["user_id"] != current_user:
@@ -146,7 +147,7 @@ async def answer_question(
                 "question": current_question_text,
                 "answer": answer_data.answer,
                 "phase": question_data["phase"],
-                "timestamp": datetime.utcnow(),
+                "timestamp": datetime.utcnow().isoformat(),
             }
         )
 
@@ -161,9 +162,12 @@ async def answer_question(
             )
 
             # Update session
-            db.collection("interview_sessions").document(session_id).update(
-                {"follow_up_count": follow_up_count + 1, "conversation": conversation}
-            )
+            update_data = {
+                "follow_up_count": follow_up_count + 1,
+                "conversation": conversation
+            }
+            
+            db.collection("interview_sessions").document(session_id).update(update_data)
 
             return InterviewResponse(
                 session_id=session_id,
@@ -207,13 +211,13 @@ async def answer_question(
             }
 
             if is_complete:
-                update_data["completed_at"] = datetime.utcnow()
+                update_data["completed_at"] = datetime.utcnow().isoformat()
 
                 # Generate profile if interview is complete
                 user_profile = profile_generator.generate_full_profile(conversation)
 
                 # Save profile to Firestore
-                db.collection("profiles").document(current_user.uid).set(user_profile)
+                db.collection("profiles").document(current_user).set(user_profile)
 
             db.collection("interview_sessions").document(session_id).update(update_data)
 
