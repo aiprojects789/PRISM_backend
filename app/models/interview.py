@@ -26,6 +26,7 @@ class InterviewResponse(BaseModel):
     question: str
     follow_up: Optional[str] = None
     is_complete: bool = False
+    progress: Optional[Dict[str, int]] = None 
 
 class UserAnswer(BaseModel):
     answer: str
