@@ -50,8 +50,10 @@ async def start_interview(current_user: str = Depends(get_current_user)):
             }
         )
 
+        total_questions = sum(len(phase["questions"]) for phase in interview_agent.phases)
+
         return InterviewResponse(
-            session_id=session_id, question=question_data["question"], is_complete=False
+            session_id=session_id, question=question_data["question"], is_complete=False,progress={"answered": 0, "total": total_questions}
         )
     except Exception as e:
         raise HTTPException(
@@ -149,6 +151,8 @@ async def answer_question(
 
         # Check if we need follow-up
         needs_followup = interview_agent.evaluate_answer_quality(answer_data.answer)
+        total_questions = sum(len(p["questions"]) for p in interview_agent.phases)
+        answered = len(conversation)
 
         if needs_followup and follow_up_count < 2:
             # Generate follow-up
@@ -166,6 +170,7 @@ async def answer_question(
                 question=current_question_text,
                 follow_up=follow_up,
                 is_complete=False,
+                progress={"answered": answered, "total": total_questions},
             )
         else:
             # Move to next question
@@ -209,6 +214,7 @@ async def answer_question(
                 session_id=session_id,
                 question=next_question_data["question"] if not is_complete else "",
                 is_complete=is_complete,
+                progress={"answered": answered, "total": total_questions},
             )
     except Exception as e:
         raise HTTPException(
