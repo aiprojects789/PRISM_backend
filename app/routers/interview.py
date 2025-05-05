@@ -132,6 +132,7 @@ async def answer_question(
         current_phase = session["current_phase"]
         current_question = session["current_question"]
         follow_up_count = session["follow_up_count"]
+        answered_questions_count = session.get("answered_questions_count", 0)
 
         question_data = interview_agent.get_current_question(
             current_phase, current_question
@@ -152,7 +153,6 @@ async def answer_question(
         # Check if we need follow-up
         needs_followup = interview_agent.evaluate_answer_quality(answer_data.answer)
         total_questions = sum(len(p["questions"]) for p in interview_agent.phases)
-        answered = len(conversation)
 
         if needs_followup and follow_up_count < 2:
             # Generate follow-up
@@ -170,7 +170,7 @@ async def answer_question(
                 question=current_question_text,
                 follow_up=follow_up,
                 is_complete=False,
-                progress={"answered": answered, "total": total_questions},
+                progress={"answered": answered_questions_count, "total": total_questions},
             )
         else:
             # Move to next question
@@ -186,10 +186,16 @@ async def answer_question(
             # Check if interview is complete
             is_complete = next_phase >= len(phases)
 
-            # Get next question
-            next_question_data = interview_agent.get_current_question(
-                next_phase, next_question
-            )
+            if not is_complete:
+                next_question_data = interview_agent.get_current_question(
+                    next_phase, next_question
+                )
+                next_question_text = next_question_data["question"]
+            else:
+                next_question_text = ""
+
+            # Increment answered count for original questions only
+            answered_questions_count += 1
 
             # Update session
             update_data = {
@@ -197,6 +203,7 @@ async def answer_question(
                 "current_question": next_question,
                 "follow_up_count": 0,
                 "conversation": conversation,
+                "answered_questions_count": answered_questions_count,
             }
 
             if is_complete:
@@ -212,9 +219,10 @@ async def answer_question(
 
             return InterviewResponse(
                 session_id=session_id,
-                question=next_question_data["question"] if not is_complete else "",
+                question=next_question_text,
                 is_complete=is_complete,
-                progress={"answered": answered, "total": total_questions},
+                progress={"answered": answered_questions_count, 
+                          "total": total_questions,}
             )
     except Exception as e:
         raise HTTPException(
