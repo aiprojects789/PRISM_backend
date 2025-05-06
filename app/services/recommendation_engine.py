@@ -60,7 +60,7 @@ class RecommendationEngine:
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
-            response_format={"type": "json_object"}
+            # response_format={"type": "json_object"}
         )
         
         try:
