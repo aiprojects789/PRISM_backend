@@ -7,14 +7,16 @@ from app.core.firebase import get_firestore_client
 from typing import Dict, Any, List
 import uuid
 from datetime import datetime
-from app.utils.utils import convert_firestore_timestamp_to_iso, clean_session_data 
+from app.utils.utils import clean_session_data
+from typing import Union
+from fastapi.responses import JSONResponse
 
 router = APIRouter()
 interview_agent = InterviewAgent()
 profile_generator = ProfileGenerator()
 
 
-@router.post("/start", response_model=InterviewResponse)
+@router.post("/start", response_model=Union[InterviewResponse, dict])
 async def start_interview(current_user: str = Depends(get_current_user)):
     """
     Starts a new interview session for the authenticated user.
@@ -51,15 +53,204 @@ async def start_interview(current_user: str = Depends(get_current_user)):
             }
         )
 
-        total_questions = sum(len(phase["questions"]) for phase in interview_agent.phases)
+        total_questions = sum(
+            len(phase["questions"]) for phase in interview_agent.phases
+        )
 
         return InterviewResponse(
-            session_id=session_id, question=question_data["question"], is_complete=False,progress={"answered": 0, "total": total_questions}
+            session_id=session_id,
+            question=question_data["question"],
+            is_complete=False,
+            progress={"answered": 0, "total": total_questions},
         )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to start interview: {str(e)}",
+        )
+
+
+@router.post(
+    "/foundation/start", response_model=InterviewResponse
+)  # Keep if most responses follow this shape
+async def start_foundation(current_user: str = Depends(get_current_user)):
+    try:
+        db = get_firestore_client()
+        existing_sessions = (
+            db.collection("interview_sessions")
+            .where("user_id", "==", current_user)
+            .stream()
+        )
+
+        session_doc = None
+        for doc in existing_sessions:
+            session_data = doc.to_dict()
+            if session_data["current_phase"] == 0 and session_data[
+                "current_question"
+            ] < len(interview_agent.phases[0]["questions"]):
+                session_doc = doc
+                session_id = doc.id
+                current_question = session_data["current_question"]
+                break
+            elif session_data["current_phase"] > 0:
+                return JSONResponse(
+                    status_code=status.HTTP_200_OK,
+                    content={
+                        "message": "Foundational phase already completed. Proceed to /main/start.",
+                        "session_id": doc.id,
+                        "is_complete": True,
+                    },
+                )
+
+        if not session_doc:
+            session_id = str(uuid.uuid4())
+            db.collection("interview_sessions").document(session_id).set(
+                {
+                    "user_id": current_user,
+                    "current_phase": 0,
+                    "current_question": 0,
+                    "follow_up_count": 0,
+                    "conversation": [],
+                    "started_at": datetime.utcnow(),
+                    "completed_at": None,
+                    "answered_questions_count": 0,
+                }
+            )
+            current_question = 0
+
+        first_question = interview_agent.get_current_question(0, current_question)
+
+        return InterviewResponse(
+            session_id=session_id,
+            question=first_question["question"],
+            is_complete=False,
+            progress={
+                "answered": current_question,
+                "total": len(interview_agent.phases[0]["questions"]),
+            },
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start foundational interview: {str(e)}",
+        )
+
+
+@router.post("/foundation/{session_id}/answer", response_model=InterviewResponse)
+async def answer_foundation_question(
+    session_id: str,
+    answer_data: UserAnswer,
+    current_user: str = Depends(get_current_user),
+):
+    """
+    Handles only the Foundational phase (phase 0) of the interview process.
+    It processes user answers, adds follow-up logic, and advances through the foundational questions.
+    """
+    try:
+        # Step 1: Fetch session
+        db = get_firestore_client()
+        doc_ref = db.collection("interview_sessions").document(session_id)
+        doc = doc_ref.get()
+
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Interview session not found")
+
+        session = clean_session_data(doc.to_dict())
+
+        if session["user_id"] != current_user:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+
+        current_phase = session["current_phase"]
+        current_question = session["current_question"]
+        follow_up_count = session.get("follow_up_count", 0)
+        answered_questions_count = session.get("answered_questions_count", 0)
+
+        # Only allow foundational phase
+        if current_phase != 0:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "message": "Foundational phase already completed.",
+                    "is_complete": True,
+                },
+            )
+
+        # Step 2: Get current foundational question
+        question_text = interview_agent.phases[0]["questions"][current_question]
+
+        # Step 3: Save current answer
+        session["conversation"].append(
+            {
+                "question": question_text,
+                "answer": answer_data.answer,
+                "phase": 0,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+        )
+
+        # Step 4: Check for follow-up
+        needs_followup = interview_agent.evaluate_answer_quality(answer_data.answer)
+
+        if needs_followup and follow_up_count < 2:
+            follow_up = interview_agent.generate_follow_up(
+                question_text, answer_data.answer
+            )
+
+            doc_ref.update(
+                {
+                    "follow_up_count": follow_up_count + 1,
+                    "conversation": session["conversation"],
+                }
+            )
+
+            return InterviewResponse(
+                session_id=session_id,
+                question=question_text,
+                follow_up=follow_up,
+                is_complete=False,
+                progress={
+                    "answered": answered_questions_count,
+                    "total": len(interview_agent.phases[0]["questions"]),
+                },
+            )
+
+        # Step 5: Move to next foundational question
+        next_question = current_question + 1
+        is_complete = next_question >= len(interview_agent.phases[0]["questions"])
+
+        update_data = {
+            "current_question": next_question,
+            "follow_up_count": 0,
+            "conversation": session["conversation"],
+            "answered_questions_count": answered_questions_count + 1,
+        }
+
+        if is_complete:
+            update_data["current_phase"] = 1
+            update_data["completed_at"] = datetime.utcnow().isoformat()
+
+        doc_ref.update(update_data)
+
+        # Step 6: Return next question or finish
+        if not is_complete:
+            next_question_text = interview_agent.phases[0]["questions"][next_question]
+        else:
+            next_question_text = ""
+
+        return InterviewResponse(
+            session_id=session_id,
+            question=next_question_text,
+            is_complete=is_complete,
+            progress={
+                "answered": answered_questions_count + 1,
+                "total": len(interview_agent.phases[0]["questions"]),
+            },
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to process answer: {str(e)}"
         )
 
 
@@ -164,9 +355,9 @@ async def answer_question(
             # Update session
             update_data = {
                 "follow_up_count": follow_up_count + 1,
-                "conversation": conversation
+                "conversation": conversation,
             }
-            
+
             db.collection("interview_sessions").document(session_id).update(update_data)
 
             return InterviewResponse(
@@ -174,7 +365,10 @@ async def answer_question(
                 question=current_question_text,
                 follow_up=follow_up,
                 is_complete=False,
-                progress={"answered": answered_questions_count, "total": total_questions},
+                progress={
+                    "answered": answered_questions_count,
+                    "total": total_questions,
+                },
             )
         else:
             # Move to next question
@@ -225,8 +419,10 @@ async def answer_question(
                 session_id=session_id,
                 question=next_question_text,
                 is_complete=is_complete,
-                progress={"answered": answered_questions_count, 
-                          "total": total_questions,}
+                progress={
+                    "answered": answered_questions_count,
+                    "total": total_questions,
+                },
             )
     except Exception as e:
         raise HTTPException(
