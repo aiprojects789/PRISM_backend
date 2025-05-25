@@ -51,6 +51,10 @@ async def generate_recommendations(
             user_profile, category=query.category, query=query.query
         )
 
+        # Generate a human-readable name for the recommendation batch
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+        name = f"{query.category.capitalize()} Recommendations - {timestamp}"
+
         # Store recommendations in Firestore
         recommendation_id = str(uuid.uuid4())
         db.collection("recommendations").document(recommendation_id).set(
@@ -58,6 +62,7 @@ async def generate_recommendations(
                 "user_id": current_user,
                 "category": query.category,
                 "query": query.query,
+                "name": name,
                 "recommendations": recommendations,
                 "created_at": datetime.utcnow(),
             }
@@ -65,17 +70,18 @@ async def generate_recommendations(
 
         return {
             "recommendation_id": recommendation_id,
+            "name": name,
             "category": query.category,
             "query": query.query,
             "recommendations": recommendations,
         }
 
     except Exception as e:
-        return e
-    #     raise HTTPException(
-    #         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-    #         detail=f"Failed to generate recommendations: {str(e)}",
-    #     )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Recommendation generation failed: {str(e)}"
+        )
+
 
 
 @router.get("/history")
@@ -114,11 +120,11 @@ async def get_recommendation_history(current_user: Any = Depends(get_current_use
             result.append(
                 {
                     "recommendation_id": rec.id,
+                    "name": rec_data.get("name"),  # ← Added
                     "category": rec_data.get("category"),
                     "query": rec_data.get("query"),
                     "created_at": rec_data.get("created_at"),
-                }
-            )
+                })
 
         return {"history": result}
 
@@ -177,6 +183,7 @@ async def get_recommendation_details(
 
         return {
             "recommendation_id": recommendation_id,
+            "name": rec_data.get("name"),
             "category": rec_data.get("category"),
             "query": rec_data.get("query"),
             "recommendations": rec_data.get("recommendations"),
