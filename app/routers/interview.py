@@ -1,904 +1,1454 @@
-# from fastapi import APIRouter, Depends, HTTPException, status
-# from app.core.security import get_current_user
-# from app.models.interview import InterviewSession, InterviewResponse, UserAnswer
-# from app.services.interview_agent import InterviewAgent
-# from app.services.profile_generator import ProfileGenerator
-# from app.core.firebase import get_firestore_client
-# from typing import Dict, Any, List
-# import uuid
-# from datetime import datetime
-# from app.utils.utils import clean_session_data
-# from typing import Union
-# from fastapi.responses import JSONResponse
-
-# router = APIRouter()
-# interview_agent = InterviewAgent()
-# profile_generator = ProfileGenerator()
-
-
-# @router.post("/start", response_model=Union[InterviewResponse, dict])
-# async def start_interview(current_user: str = Depends(get_current_user)):
-#     """
-#     Starts a new interview session with dynamic questions from Firestore.
-    
-#     Args:
-#         current_user (str): The currently authenticated user ID.
-        
-#     Returns:
-#         InterviewResponse: Contains the session ID, first question, and status.
-#     """
-#     try:
-#         # Get pending questions from tier1
-#         pending_questions = interview_agent.get_pending_questions_by_field("tier1")
-        
-#         if not pending_questions:
-#             raise HTTPException(
-#                 status_code=status.HTTP_400_BAD_REQUEST,
-#                 detail="No pending questions available for interview"
-#             )
-        
-#         # Create session with dynamic questions
-#         session_data = interview_agent.create_session(current_user, pending_questions)
-        
-#         # Get first question
-#         first_question_data = interview_agent.get_current_question(session_data)
-        
-#         if not first_question_data:
-#             raise HTTPException(
-#                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#                 detail="Failed to get first question"
-#             )
-        
-#         # Save session to Firestore
-#         db = get_firestore_client()
-#         session_id = session_data["session_id"]
-        
-#         db.collection("interview_sessions").document(session_id).set({
-#             "user_id": current_user,
-#             "current_phase": session_data["current_phase"],
-#             "current_question": session_data["current_question"],
-#             "follow_up_depth": session_data["follow_up_depth"],
-#             "conversation": session_data["conversation"],
-#             "phases": session_data["phases"],
-#             "started_at": datetime.utcnow(),
-#             "completed_at": None,
-#         })
-        
-#         total_questions = len(pending_questions)
-        
-#         return InterviewResponse(
-#             session_id=session_id,
-#             question=first_question_data["question"],
-#             is_complete=False,
-#             progress={"answered": 0, "total": total_questions},
-#         )
-        
-#     except Exception as e:
-#         raise HTTPException(
-#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#             detail=f"Failed to start interview: {str(e)}",
-#         )
-
-
-# @router.post("/{session_id}/answer", response_model=InterviewResponse)
-# async def answer_question(
-#     session_id: str,
-#     answer_data: UserAnswer,
-#     current_user: str = Depends(get_current_user),
-# ):
-#     """
-#     Process user's answer and return next question or follow-up.
-    
-#     Args:
-#         session_id (str): The interview session ID.
-#         answer_data (UserAnswer): The user's response.
-#         current_user (str): The authenticated user ID.
-        
-#     Returns:
-#         InterviewResponse: Next question or completion status.
-#     """
-#     try:
-#         # Get session from Firestore
-#         db = get_firestore_client()
-#         session_doc = db.collection("interview_sessions").document(session_id).get()
-        
-#         if not session_doc.exists:
-#             raise HTTPException(
-#                 status_code=status.HTTP_404_NOT_FOUND,
-#                 detail="Interview session not found"
-#             )
-        
-#         session_data = clean_session_data(session_doc.to_dict())
-        
-#         # Verify user owns session
-#         if session_data["user_id"] != current_user:
-#             raise HTTPException(
-#                 status_code=status.HTTP_403_FORBIDDEN,
-#                 detail="Not authorized to access this session"
-#             )
-        
-#         # Get current question data
-#         current_question_data = interview_agent.get_current_question(session_data)
-        
-#         if not current_question_data:
-#             raise HTTPException(
-#                 status_code=status.HTTP_400_BAD_REQUEST,
-#                 detail="No current question available"
-#             )
-        
-#         # Check if we need follow-up
-#         needs_followup = interview_agent.evaluate_answer_quality(answer_data.answer)
-#         current_depth = session_data.get("follow_up_depth", 0)
-        
-#         if needs_followup and current_depth < 2:
-#             # Generate follow-up question
-#             follow_up = interview_agent.generate_follow_up(
-#                 current_question_data["question"], 
-#                 answer_data.answer
-#             )
-            
-#             # Add answer to conversation
-#             session_data["conversation"].append({
-#                 "question": current_question_data["question"],
-#                 "answer": answer_data.answer,
-#                 "field": current_question_data["field"],
-#                 "phase": current_question_data["phase"],
-#                 "timestamp": datetime.utcnow().isoformat(),
-#             })
-            
-#             # Update follow-up depth
-#             session_data["follow_up_depth"] = current_depth + 1
-            
-#             # Save updated session
-#             db.collection("interview_sessions").document(session_id).update({
-#                 "follow_up_depth": session_data["follow_up_depth"],
-#                 "conversation": session_data["conversation"],
-#             })
-            
-#             return InterviewResponse(
-#                 session_id=session_id,
-#                 question=current_question_data["question"],
-#                 follow_up=follow_up,
-#                 is_complete=False,
-#                 progress={
-#                     "answered": len([q for q in session_data["conversation"] if q.get("field")]),
-#                     "total": len(session_data["phases"][0]["questions"]),
-#                 },
-#             )
-        
-#         # Submit answer and advance to next question
-#         result = interview_agent.submit_answer(session_data, answer_data.answer)
-        
-#         if not result["success"]:
-#             raise HTTPException(
-#                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#                 detail=result.get("message", "Failed to submit answer")
-#             )
-        
-#         updated_session = result["session_data"]
-#         is_complete = result["is_complete"]
-        
-#         # Get next question if not complete
-#         next_question = ""
-#         if not is_complete:
-#             next_question_data = interview_agent.get_current_question(updated_session)
-#             if next_question_data:
-#                 next_question = next_question_data["question"]
-        
-#         # Update session in Firestore
-#         update_data = {
-#             "current_phase": updated_session["current_phase"],
-#             "current_question": updated_session["current_question"],
-#             "follow_up_depth": 0,  # Reset follow-up depth
-#             "conversation": updated_session["conversation"],
-#         }
-        
-#         if is_complete:
-#             update_data["completed_at"] = datetime.utcnow().isoformat()
-            
-#             # Generate profile if interview is complete
-#             user_profile = profile_generator.generate_full_profile(updated_session["conversation"])
-            
-#             # Save profile to Firestore
-#             db.collection("profiles").document(current_user).set(user_profile)
-        
-#         db.collection("interview_sessions").document(session_id).update(update_data)
-        
-#         return InterviewResponse(
-#             session_id=session_id,
-#             question=next_question,
-#             is_complete=is_complete,
-#             progress={
-#                 "answered": len([q for q in updated_session["conversation"] if q.get("field")]),
-#                 "total": len(updated_session["phases"][0]["questions"]),
-#             },
-#         )
-        
-#     except Exception as e:
-#         raise HTTPException(
-#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#             detail=f"Failed to process answer: {str(e)}",
-#         )
-
-
-# @router.get("/sessions")
-# async def get_user_sessions(current_user: str = Depends(get_current_user)):
-#     """
-#     Get all interview sessions for the authenticated user.
-    
-#     Returns:
-#         A list of session summaries including progress and timestamps.
-#     """
-#     try:
-#         db = get_firestore_client()
-#         sessions = (
-#             db.collection("interview_sessions")
-#             .where("user_id", "==", current_user)
-#             .stream()
-#         )
-        
-#         result = []
-#         for session in sessions:
-#             session_data = session.to_dict()
-            
-#             # Calculate progress
-#             total_questions = 0
-#             answered_questions = len([q for q in session_data.get("conversation", []) if q.get("field")])
-            
-#             if session_data.get("phases"):
-#                 total_questions = len(session_data["phases"][0].get("questions", []))
-            
-#             result.append({
-#                 "session_id": session.id,
-#                 "started_at": session_data.get("started_at"),
-#                 "completed_at": session_data.get("completed_at"),
-#                 "progress": {
-#                     "phase": session_data.get("current_phase", 0),
-#                     "question": session_data.get("current_question", 0),
-#                     "answered": answered_questions,
-#                     "total": total_questions,
-#                     "is_complete": session_data.get("completed_at") is not None,
-#                 },
-#             })
-        
-#         return {"sessions": result}
-        
-#     except Exception as e:
-#         raise HTTPException(
-#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#             detail=f"Failed to retrieve sessions: {str(e)}",
-#         )
-
-
-# @router.get("/{session_id}")
-# async def get_session_details(
-#     session_id: str, current_user: str = Depends(get_current_user)
-# ):
-#     """
-#     Retrieve detailed information about a specific interview session.
-    
-#     Args:
-#         session_id (str): The session ID.
-#         current_user (str): The authenticated user ID.
-        
-#     Returns:
-#         JSON: Session metadata and conversation history.
-#     """
-#     try:
-#         db = get_firestore_client()
-#         session_doc = db.collection("interview_sessions").document(session_id).get()
-        
-#         if not session_doc.exists:
-#             raise HTTPException(
-#                 status_code=status.HTTP_404_NOT_FOUND,
-#                 detail="Interview session not found",
-#             )
-        
-#         session = session_doc.to_dict()
-        
-#         # Verify user owns this session
-#         if session["user_id"] != current_user:
-#             raise HTTPException(
-#                 status_code=status.HTTP_403_FORBIDDEN,
-#                 detail="Not authorized to access this session",
-#             )
-        
-#         return {
-#             "session_id": session_id,
-#             "started_at": session.get("started_at"),
-#             "completed_at": session.get("completed_at"),
-#             "current_phase": session.get("current_phase"),
-#             "current_question": session.get("current_question"),
-#             "conversation": session.get("conversation", []),
-#             "phases": session.get("phases", []),
-#             "is_complete": session.get("completed_at") is not None,
-#         }
-        
-#     except Exception as e:
-#         raise HTTPException(
-#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#             detail=f"Failed to retrieve session details: {str(e)}",
-#         )
-
-
-# @router.delete("/{session_id}")
-# async def delete_session(
-#     session_id: str, current_user: str = Depends(get_current_user)
-# ):
-#     """
-#     Delete a specific interview session.
-    
-#     Args:
-#         session_id (str): The session ID.
-#         current_user (str): The authenticated user ID.
-        
-#     Returns:
-#         JSON: Success message.
-#     """
-#     try:
-#         db = get_firestore_client()
-#         session_doc = db.collection("interview_sessions").document(session_id).get()
-        
-#         if not session_doc.exists:
-#             raise HTTPException(
-#                 status_code=status.HTTP_404_NOT_FOUND,
-#                 detail="Interview session not found",
-#             )
-        
-#         session = session_doc.to_dict()
-        
-#         # Verify user owns this session
-#         if session["user_id"] != current_user:
-#             raise HTTPException(
-#                 status_code=status.HTTP_403_FORBIDDEN,
-#                 detail="Not authorized to delete this session",
-#             )
-        
-#         # Delete the session
-#         db.collection("interview_sessions").document(session_id).delete()
-        
-#         return {"message": "Session deleted successfully"}
-        
-#     except Exception as e:
-#         raise HTTPException(
-#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#             detail=f"Failed to delete session: {str(e)}",
-#         )
-
-
-# @router.get("/questions/pending")
-# async def get_pending_questions(
-#     current_user: str = Depends(get_current_user),
-#     tier: str = "tier1"
-# ):
-#     """
-#     Get all pending questions for a specific tier.
-    
-#     Args:
-#         current_user (str): The authenticated user ID.
-#         tier (str): The tier name (default: "tier1").
-        
-#     Returns:
-#         JSON: List of pending questions.
-#     """
-#     try:
-#         pending_questions = interview_agent.get_pending_questions_by_field(tier)
-        
-#         return {
-#             "tier": tier,
-#             "pending_questions": pending_questions,
-#             "count": len(pending_questions)
-#         }
-        
-#     except Exception as e:
-#         raise HTTPException(
-#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#             detail=f"Failed to retrieve pending questions: {str(e)}",
-#         )
-
-
+# app/routers/interview.py - Complete User-Specific Profile Management
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from app.core.security import get_current_user
-from app.models.interview import InterviewSession, InterviewResponse, UserAnswer
-from app.services.interview_agent import InterviewAgent
-from app.services.profile_generator import ProfileGenerator
-from app.core.firebase import get_firestore_client
-from typing import Dict, Any, List
+from fastapi.security import HTTPAuthorizationCredentials
+from pydantic import BaseModel
+from typing import Dict, Any, List, Optional
 import uuid
+import copy
 from datetime import datetime
-from app.utils.utils import clean_session_data
-from typing import Union
-from fastapi.responses import JSONResponse
+from openai import OpenAI
+from langchain_community.chat_models import ChatOpenAI
+from langchain.schema import SystemMessage, HumanMessage
+
+from app.core.security import get_current_user, security
+from app.core.firebase import get_firestore_client
+from app.core.config import get_settings
+from app.routers.conversations import save_conversation_message
 
 router = APIRouter()
-interview_agent = InterviewAgent()
-profile_generator = ProfileGenerator()
 
+# Pydantic models for the interview
+class InterviewStartRequest(BaseModel):
+    user_id: str
+    selected_category: str = "Movies"  # Movies, Food, Travel
 
-@router.post("/start", response_model=Union[InterviewResponse, dict])
-async def start_interview(current_user: str = Depends(get_current_user)):
-    """
-    Starts a new interview session with dynamic questions from Firestore.
+class InterviewAnswerRequest(BaseModel):
+    session_id: str
+    answer: str
+
+class InterviewStatusResponse(BaseModel):
+    session_id: str
+    is_complete: bool
+    current_tier_idx: int
+    current_phase: str
+    current_question: Optional[Dict[str, Any]]
+    progress: Dict[str, Any]
+
+class TieredInterviewAgent:
+    def __init__(self, db, openai_key, selected_category="Movies", user_id=None):
+        if not user_id:
+            raise ValueError("user_id is required for TieredInterviewAgent")
+            
+        self.db = db
+        self.openai_key = openai_key
+        self.user_id = user_id  # 🔥 CRITICAL: Always require user_id
+        self.selected_category = selected_category
+        self.current_tier_idx = 0
+        self.current_phase = 'general'
+        self.current_q_idx = 0
+        self.tier_keys = []
+        self.general_questions = {}
+        self.category_questions = {}
+        self.profile_structure = {}
+        self.conversation = []
+        self.follow_up_count = 0
+        self.started_at = datetime.utcnow()
+        self.completed_at = None
+
+        # Category mapping
+        selected = selected_category.lower()
+        cat_map = {
+            'movies': 'moviesAndTV_tiered_questions.json',
+            'food': 'foodAndDining_tiered_questions.json',
+            'travel': 'travel_tiered_questions.json'
+        }
+        self.cat_doc_id = cat_map.get(selected, 'moviesAndTV_tiered_questions.json')
+        
+        self.load_data()
+
+    def load_data(self):
+        """Load questions and USER-SPECIFIC profile data from Firestore"""
+        try:
+            print(f"📚 Loading data for user: {self.user_id}")
+            
+            # Load general questions (create user-specific copy)
+            gen_doc = self.db.collection("question_collection").document("general_tiered_questions.json").get()
+            if gen_doc.exists:
+                self.general_questions = self._create_user_specific_questions(gen_doc.to_dict(), "general")
+            else:
+                self.general_questions = {}
+            
+            # Load category questions (create user-specific copy)
+            cat_doc = self.db.collection("question_collection").document(self.cat_doc_id).get()
+            if cat_doc.exists:
+                self.category_questions = self._create_user_specific_questions(cat_doc.to_dict(), "category")
+            else:
+                self.category_questions = {}
+            
+            # Load USER-SPECIFIC profile structure
+            self.profile_structure = self._load_user_profile_structure()
+            
+            # Extract tier keys
+            if self.general_questions:
+                self.tier_keys = sorted(
+                    [k for k in self.general_questions.keys() if k.startswith('tier')],
+                    key=lambda x: int(x.replace('tier', ''))
+                )
+            else:
+                self.tier_keys = ["tier1", "tier2", "tier3"]
+
+            print(f"✅ Data loaded for user {self.user_id}: {len(self.tier_keys)} tiers")
+
+        except Exception as e:
+            print(f"❌ Failed to load data for user {self.user_id}: {e}")
+            self.general_questions = {}
+            self.category_questions = {}
+            self.profile_structure = {}
+            self.tier_keys = ["tier1", "tier2", "tier3"]
+
+        self.pick_up_where_left_off()
+
+    def _create_user_specific_questions(self, template_questions: dict, question_type: str) -> dict:
+        """Create user-specific copy of questions from template"""
+        try:
+            # Check if user already has their own copy
+            user_doc_id = f"{self.user_id}_{question_type}_questions.json"
+            user_doc = self.db.collection("user_questions").document(user_doc_id).get()
+            
+            if user_doc.exists:
+                # User already has their own copy, load it
+                print(f"✅ Loading existing {question_type} questions for user {self.user_id}")
+                return user_doc.to_dict()
+            else:
+                # Create new user-specific copy from template
+                print(f"🆕 Creating new {question_type} questions for user {self.user_id}")
+                user_questions = self._deep_copy_questions(template_questions)
+                
+                # Add user metadata
+                user_questions["user_id"] = self.user_id
+                user_questions["created_at"] = datetime.utcnow().isoformat()
+                user_questions["updated_at"] = datetime.utcnow().isoformat()
+                user_questions["question_type"] = question_type
+                user_questions["category"] = self.selected_category if question_type == "category" else "general"
+                
+                # Save user-specific copy
+                self.db.collection("user_questions").document(user_doc_id).set(user_questions)
+                
+                return user_questions
+                
+        except Exception as e:
+            print(f"❌ Error creating user-specific questions: {e}")
+            return template_questions  # Fallback to template
+
+    def _deep_copy_questions(self, questions: dict) -> dict:
+        """Create a deep copy of questions and reset all statuses to pending"""
+        user_questions = copy.deepcopy(questions)
+        
+        # Reset all question statuses to pending for new user
+        for tier_key, tier_data in user_questions.items():
+            if isinstance(tier_data, dict) and 'questions' in tier_data:
+                # Reset tier status
+                tier_data['status'] = 'pending'
+                if 'completed_at' in tier_data:
+                    del tier_data['completed_at']
+                
+                # Reset all questions to pending
+                for question in tier_data.get('questions', []):
+                    if isinstance(question, dict):
+                        question['qest'] = 'pending'
+                        # Remove any previous answers
+                        for key in ['answer', 'answered_at']:
+                            if key in question:
+                                del question[key]
+        
+        return user_questions
+
+    def _load_user_profile_structure(self) -> dict:
+        """Load USER-SPECIFIC profile structure"""
+        try:
+            # User-specific profile document
+            profile_doc_id = f"{self.user_id}_profile_structure.json"
+            profile_doc = self.db.collection("user_profiles").document(profile_doc_id).get()
+            
+            if profile_doc.exists:
+                print(f"✅ Loading existing profile structure for user {self.user_id}")
+                return profile_doc.to_dict()
+            else:
+                # Create new user profile from template
+                print(f"🆕 Creating new profile structure for user {self.user_id}")
+                
+                # Load the profile template
+                template_doc = self.db.collection("user_collection").document("profile_strcuture.json").get()
+                
+                if template_doc.exists:
+                    template_profile = template_doc.to_dict()
+                else:
+                    # Create basic profile structure if template doesn't exist
+                    template_profile = {
+                        "generalprofile": {},
+                        "recommendationProfiles": {
+                            self.selected_category.lower(): {}
+                        },
+                        "simulationPreferences": {}
+                    }
+                
+                # Add user metadata
+                user_profile = {
+                    **template_profile,
+                    "user_id": self.user_id,
+                    "created_at": datetime.utcnow().isoformat(),
+                    "updated_at": datetime.utcnow().isoformat(),
+                    "selected_category": self.selected_category,
+                    "version": "1.0"
+                }
+                
+                # Save user-specific profile
+                self.db.collection("user_profiles").document(profile_doc_id).set(user_profile)
+                
+                return user_profile
+                
+        except Exception as e:
+            print(f"❌ Error loading user profile structure: {e}")
+            return {}
+
+    def pick_up_where_left_off(self):
+        """Find the first tier that is not completed and set it to in_process"""
+        for idx, tier_key in enumerate(self.tier_keys):
+            status = self.general_questions.get(tier_key, {}).get('status', '')
+            if status == 'completed':
+                continue
+
+            self.current_tier_idx = idx
+            if status != 'in_process':
+                self.general_questions[tier_key]['status'] = 'in_process'
+            return
+
+        # If no tier left, mark interview complete
+        self.current_tier_idx = len(self.tier_keys)
+
+    def get_current_tier_key(self):
+        """Get current tier key"""
+        if self.current_tier_idx < len(self.tier_keys):
+            return self.tier_keys[self.current_tier_idx]
+        return None
+
+    def get_pending_questions(self, dataset, tier_key):
+        """Get pending questions for a specific tier and dataset"""
+        if not dataset or not tier_key or tier_key not in dataset:
+            return []
+            
+        tier = dataset.get(tier_key, {})
+        
+        # For general questions, respect the tier status
+        if dataset == self.general_questions:
+            tier_status = tier.get('status', '')
+            if tier_status != 'in_process' and tier_status != '':
+                return []
+        
+        questions = tier.get('questions', [])
+        if not isinstance(questions, list):
+            return []
+            
+        return [q for q in questions if isinstance(q, dict) and q.get('qest') == 'pending']
     
-    Args:
-        current_user (str): The currently authenticated user ID.
+    def get_current_question(self):
+        """Get the current question to be asked"""
+        tier_key = self.get_current_tier_key()
+        if not tier_key:
+            return None
+            
+        if self.current_phase == 'general':
+            pending = self.get_pending_questions(self.general_questions, tier_key)
+            if pending and 0 <= self.current_q_idx < len(pending):
+                question_data = pending[self.current_q_idx]
+                return {
+                    'question': question_data.get('question', ''),
+                    'field': question_data.get('field', ''),
+                    'phase': 'general',
+                    'tier': tier_key,
+                    'question_id': question_data.get('id', ''),
+                    'category': question_data.get('category', 'general'),
+                    'user_id': self.user_id
+                }
+        elif self.current_phase == 'category':
+            pending = self.get_pending_questions(self.category_questions, tier_key)
+            if pending and 0 <= self.current_q_idx < len(pending):
+                question_data = pending[self.current_q_idx]
+                return {
+                    'question': question_data.get('question', ''),
+                    'field': question_data.get('field', ''),
+                    'phase': 'category',
+                    'tier': tier_key,
+                    'question_id': question_data.get('id', ''),
+                    'category': question_data.get('category', self.selected_category.lower()),
+                    'user_id': self.user_id
+                }
         
-    Returns:
-        InterviewResponse: Contains the session ID, first question, and detailed metadata.
-    """
+        return None
+
+    def regenerate_question_with_motivation(self, next_question: str, user_response: str = None) -> str:
+        """Generate a conversational follow-up by acknowledging the user's response"""
+        try:
+            client = OpenAI(api_key=self.openai_key)
+
+            prompt = f"Next question: {next_question}\n"
+            if user_response:
+                prompt += f"User's previous response: {user_response}\n"
+            prompt += (
+                "Please write a natural, conversational transition that acknowledges the user's response "
+                "and leads into the next question. Keep it warm, curious, and supportive."
+            )
+
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a friendly, engaging interviewer having a casual, supportive conversation. When provided with a user's previous response and a next question, create a natural, conversational transition. Acknowledge or positively reflect on the user's response, and then smoothly ask the next question. Keep the tone friendly, curious, and encouraging, and avoid robotic phrasing. Do not rigidly repeat the question; weave it naturally into your words."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=150
+            )
+            
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"Error generating motivated question: {e}")
+            return next_question  # Fallback to original question
+
+    def submit_answer(self, answer):
+        """Submit answer and update profile structure"""
+        tier_key = self.get_current_tier_key()
+        if not tier_key:
+            return False
+            
+        current_q = self.get_current_question()
+        if not current_q:
+            return False
+        
+        # Update the question status in the appropriate dataset
+        if self.current_phase == 'general':
+            dataset = self.general_questions
+        else:
+            dataset = self.category_questions
+            
+        pending = self.get_pending_questions(dataset, tier_key)
+        if pending and 0 <= self.current_q_idx < len(pending):
+            # Find the question in the original dataset and mark as answered
+            question_to_update = pending[self.current_q_idx]
+            question_text = question_to_update.get('question', '')
+            
+            tier_questions = dataset.get(tier_key, {}).get('questions', [])
+            for q in tier_questions:
+                if q.get('question') == question_text:
+                    q['qest'] = 'answered'
+                    q['answered_at'] = datetime.utcnow().isoformat()
+                    q['answer'] = answer
+                    q['user_id'] = self.user_id  # Track which user answered
+                    break
+            
+            # Update profile structure with the answer
+            field_path = current_q.get('field', '')
+            if field_path:
+                self.update_profile_structure(field_path, answer)
+            
+            # Add to conversation history with enhanced metadata
+            conversation_entry = {
+                "question": current_q.get('question'),
+                "answer": answer,
+                "field": field_path,
+                "phase": self.current_phase,
+                "tier": tier_key,
+                "timestamp": datetime.utcnow().isoformat(),
+                "question_id": current_q.get('question_id', ''),
+                "category": current_q.get('category', 'general'),
+                "user_id": self.user_id,
+                "answer_metadata": {
+                    "word_count": len(answer.split()),
+                    "character_count": len(answer),
+                    "answer_quality": self._assess_answer_quality(answer)
+                }
+            }
+            
+            self.conversation.append(conversation_entry)
+            
+            # Move to next question or phase
+            self.advance_to_next()
+            
+            return True
+        
+        return False
+
+    def _assess_answer_quality(self, answer: str) -> str:
+        """Assess the quality of an answer based on length and content"""
+        word_count = len(answer.split())
+        
+        if word_count < 5:
+            return "very_short"
+        elif word_count < 15:
+            return "short"
+        elif word_count < 50:
+            return "medium"
+        elif word_count < 100:
+            return "detailed"
+        else:
+            return "very_detailed"
+
+    def update_profile_structure(self, field_path, answer):
+        """Update profile structure with the answer"""
+        if not field_path or not isinstance(field_path, str):
+            return
+            
+        keys = field_path.split('.')
+        current = self.profile_structure
+        
+        try:
+            for key in keys[:-1]:
+                if key not in current:
+                    current[key] = {}
+                current = current[key]
+            
+            final_key = keys[-1]
+            if final_key in current and isinstance(current[final_key], dict):
+                current[final_key]['value'] = answer
+                current[final_key]['updated_at'] = datetime.utcnow().isoformat()
+                current[final_key]['user_id'] = self.user_id
+            else:
+                if final_key not in current:
+                    current[final_key] = {}
+                if isinstance(current[final_key], dict):
+                    current[final_key]['value'] = answer
+                    current[final_key]['updated_at'] = datetime.utcnow().isoformat()
+                    current[final_key]['user_id'] = self.user_id
+                else:
+                    current[final_key] = {
+                        'value': answer,
+                        'updated_at': datetime.utcnow().isoformat(),
+                        'user_id': self.user_id
+                    }
+        except (KeyError, TypeError, AttributeError) as e:
+            print(f"Error updating profile structure for field '{field_path}': {e}")
+            return
+
+    def advance_to_next(self):
+        """Advance to next question, phase, or tier"""
+        tier_key = self.get_current_tier_key()
+        if not tier_key:
+            return
+        
+        if self.current_phase == 'general':
+            pending = self.get_pending_questions(self.general_questions, tier_key)
+            if pending and self.current_q_idx + 1 < len(pending):
+                self.current_q_idx += 1
+            else:
+                # Move to category phase
+                self.current_phase = 'category'
+                self.current_q_idx = 0
+                
+                cat_pending = self.get_pending_questions(self.category_questions, tier_key)
+                if not cat_pending:
+                    self.complete_current_tier()
+                    self.advance_to_next_tier()
+        
+        elif self.current_phase == 'category':
+            pending = self.get_pending_questions(self.category_questions, tier_key)
+            if pending and self.current_q_idx + 1 < len(pending):
+                self.current_q_idx += 1
+            else:
+                self.complete_current_tier()
+                self.advance_to_next_tier()
+
+    def complete_current_tier(self):
+        """Mark current tier as completed"""
+        tier_key = self.get_current_tier_key()
+        if tier_key:
+            if tier_key in self.general_questions:
+                self.general_questions[tier_key]['status'] = 'completed'
+                self.general_questions[tier_key]['completed_at'] = datetime.utcnow().isoformat()
+                self.general_questions[tier_key]['completed_by'] = self.user_id
+            
+            if tier_key in self.category_questions:
+                self.category_questions[tier_key]['status'] = 'completed'
+                self.category_questions[tier_key]['completed_at'] = datetime.utcnow().isoformat()
+                self.category_questions[tier_key]['completed_by'] = self.user_id
+
+    def advance_to_next_tier(self):
+        """Move to the next tier"""
+        if self.current_tier_idx + 1 < len(self.tier_keys):
+            self.current_tier_idx += 1
+            self.current_phase = 'general'
+            self.current_q_idx = 0
+            
+            next_tier_key = self.get_current_tier_key()
+            if next_tier_key and next_tier_key in self.general_questions:
+                self.general_questions[next_tier_key]['status'] = 'in_process'
+        else:
+            self.current_tier_idx = len(self.tier_keys)
+            self.completed_at = datetime.utcnow()
+
+    def is_complete(self):
+        """Check if interview is complete"""
+        return self.current_tier_idx >= len(self.tier_keys)
+
+    def save_to_firestore(self):
+        """Save USER-SPECIFIC data back to Firestore"""
+        try:
+            # Save user-specific profile structure
+            profile_doc_id = f"{self.user_id}_profile_structure.json"
+            self.profile_structure["updated_at"] = datetime.utcnow().isoformat()
+            self.profile_structure["user_id"] = self.user_id
+            self.db.collection("user_profiles").document(profile_doc_id).set(self.profile_structure)
+            
+            # Save user-specific question collections
+            general_doc_id = f"{self.user_id}_general_questions.json"
+            self.general_questions["updated_at"] = datetime.utcnow().isoformat()
+            self.general_questions["user_id"] = self.user_id
+            self.db.collection("user_questions").document(general_doc_id).set(self.general_questions)
+            
+            category_doc_id = f"{self.user_id}_category_questions.json"
+            self.category_questions["updated_at"] = datetime.utcnow().isoformat()
+            self.category_questions["user_id"] = self.user_id
+            self.db.collection("user_questions").document(category_doc_id).set(self.category_questions)
+            
+            print(f"✅ Saved user-specific data for user {self.user_id}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to save user-specific data for user {self.user_id}: {e}")
+            return False
+
+    def to_dict(self):
+        """Convert agent state to dictionary for database storage"""
+        return {
+            "user_id": self.user_id,
+            "selected_category": self.selected_category,
+            "current_tier_idx": self.current_tier_idx,
+            "current_phase": self.current_phase,
+            "current_q_idx": self.current_q_idx,
+            "tier_keys": self.tier_keys,
+            "cat_doc_id": self.cat_doc_id,
+            "conversation": self.conversation,
+            "follow_up_count": self.follow_up_count,
+            "started_at": self.started_at.isoformat() if hasattr(self.started_at, 'isoformat') else str(self.started_at),
+            "completed_at": self.completed_at.isoformat() if self.completed_at and hasattr(self.completed_at, 'isoformat') else None,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat()
+        }
+
+    @classmethod
+    def from_dict(cls, db, openai_key, data, selected_category="Movies"):
+        """Create agent from database data"""
+        user_id = data.get("user_id")
+        if not user_id:
+            raise ValueError("user_id is required to restore agent from database")
+            
+        agent = cls(db, openai_key, selected_category, user_id)
+        
+        # Restore state from database
+        agent.current_tier_idx = data.get("current_tier_idx", 0)
+        agent.current_phase = data.get("current_phase", 'general')
+        agent.current_q_idx = data.get("current_q_idx", 0)
+        agent.conversation = data.get("conversation", [])
+        agent.follow_up_count = data.get("follow_up_count", 0)
+        
+        # Restore timestamps
+        started_at_str = data.get("started_at")
+        if started_at_str:
+            try:
+                agent.started_at = datetime.fromisoformat(started_at_str.replace('Z', '+00:00'))
+            except:
+                agent.started_at = datetime.utcnow()
+        
+        completed_at_str = data.get("completed_at")
+        if completed_at_str:
+            try:
+                agent.completed_at = datetime.fromisoformat(completed_at_str.replace('Z', '+00:00'))
+            except:
+                agent.completed_at = None
+        
+        return agent
+
+# 🔥 CRITICAL: Database helper functions for USER-SPECIFIC session management
+def save_interview_session(user_id: str, session_id: str, agent: TieredInterviewAgent, db):
+    """Save USER-SPECIFIC interview session to database"""
     try:
-        # Get pending questions from tier1
-        pending_questions = interview_agent.get_pending_questions_by_field("tier1")
+        session_data = {
+            "session_id": session_id,
+            "user_id": user_id,  # 🔥 CRITICAL: Always include user_id
+            "agent_state": agent.to_dict(),
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+            "is_active": True,
+            "status": "in_progress",
+            "metadata": {
+                "selected_category": agent.selected_category,
+                "current_tier": agent.current_tier_idx,
+                "current_phase": agent.current_phase,
+                "total_questions_answered": len(agent.conversation),
+                "user_specific": True  # Flag to indicate this is user-specific
+            }
+        }
         
-        if not pending_questions:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No pending questions available for interview"
-            )
+        # Save to user-specific collection
+        db.collection("interview_sessions").document(session_id).set(session_data)
         
-        # Create session with dynamic questions
-        session_data = interview_agent.create_session(current_user, pending_questions)
+        # Also maintain a user index for easy querying
+        user_session_ref = {
+            "session_id": session_id,
+            "created_at": datetime.utcnow(),
+            "status": "in_progress",
+            "category": agent.selected_category
+        }
+        db.collection("user_interview_index").document(user_id).collection("sessions").document(session_id).set(user_session_ref)
         
-        # Get first question
-        first_question_data = interview_agent.get_current_question(session_data)
+        print(f"✅ User-specific session {session_id} saved for user {user_id}")
+        return True
+    except Exception as e:
+        print(f"❌ Error saving user-specific session for user {user_id}: {e}")
+        return False
+
+def load_interview_session(session_id: str, db) -> Optional[TieredInterviewAgent]:
+    """Load USER-SPECIFIC interview session from database"""
+    try:
+        doc = db.collection("interview_sessions").document(session_id).get()
+        if not doc.exists:
+            print(f"❌ Session {session_id} not found in database")
+            return None
         
-        if not first_question_data:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to get first question"
-            )
+        session_data = doc.to_dict()
+        agent_state = session_data.get("agent_state", {})
+        user_id = session_data.get("user_id")
         
-        # Save session to Firestore
-        db = get_firestore_client()
-        session_id = session_data["session_id"]
+        if not user_id:
+            print(f"❌ No user_id found in session {session_id}")
+            return None
         
-        db.collection("interview_sessions").document(session_id).set({
-            "user_id": current_user,
-            "current_phase": session_data["current_phase"],
-            "current_question": session_data["current_question"],
-            "follow_up_depth": session_data["follow_up_depth"],
-            "conversation": session_data["conversation"],
-            "phases": session_data["phases"],
-            "started_at": datetime.utcnow(),
-            "completed_at": None,
+        # Recreate agent from saved state
+        settings = get_settings()
+        agent = TieredInterviewAgent.from_dict(
+            db, 
+            settings.OPENAI_API_KEY, 
+            agent_state,
+            agent_state.get("selected_category", "Movies")
+        )
+        
+        print(f"✅ User-specific session {session_id} loaded for user {user_id}")
+        return agent
+    except Exception as e:
+        print(f"❌ Error loading interview session: {e}")
+        return None
+
+def update_interview_session(session_id: str, agent: TieredInterviewAgent, db):
+    """Update USER-SPECIFIC interview session in database"""
+    try:
+        update_data = {
+            "agent_state": agent.to_dict(),
+            "updated_at": datetime.utcnow(),
+            "status": "completed" if agent.is_complete() else "in_progress",
+            "metadata": {
+                "current_tier": agent.current_tier_idx,
+                "current_phase": agent.current_phase,
+                "total_questions_answered": len(agent.conversation),
+                "last_updated": datetime.utcnow().isoformat(),
+                "user_specific": True
+            }
+        }
+        
+        if agent.is_complete():
+            update_data["completed_at"] = datetime.utcnow()
+        
+        db.collection("interview_sessions").document(session_id).update(update_data)
+        
+        # Update user index
+        db.collection("user_interview_index").document(agent.user_id).collection("sessions").document(session_id).update({
+            "status": update_data["status"],
+            "updated_at": datetime.utcnow()
         })
         
-        total_questions = len(pending_questions)
-        
-        # Enhanced response with detailed information
-        return {
-            "session_id": session_id,
-            "question": first_question_data["question"],
-            "question_details": {
-                "field": first_question_data.get("field"),
-                "tier": first_question_data.get("tier_name", "tier1"),
-                "phase": first_question_data.get("phase"),
-                "question_number": session_data["current_question"] + 1,
-                "total_questions": total_questions
-            },
-            "tier_info": {
-                "current_tier": "tier1",
-                "tier_status": "in_progress",
-                "total_tiers": len(interview_agent.tier_questions),
-                "available_tiers": list(interview_agent.tier_questions.keys())
-            },
-            "session_metadata": {
-                "user_id": current_user,
-                "started_at": datetime.utcnow().isoformat(),
-                "current_phase": session_data["current_phase"],
-                "follow_up_depth": session_data["follow_up_depth"],
-                "phases_info": [
-                    {
-                        "name": phase["name"],
-                        "total_questions": len(phase["questions"]),
-                        "tier_name": phase.get("tier_name", "unknown")
-                    }
-                    for phase in session_data["phases"]
-                ]
-            },
-            "is_complete": False,
-            "progress": {
-                "answered": 0,
-                "total": total_questions,
-                "percentage": 0,
-                "phase_progress": f"1/{len(session_data['phases'])}"
-            }
-        }
-        
+        print(f"✅ User-specific session {session_id} updated for user {agent.user_id}")
+        return True
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to start interview: {str(e)}",
-        )
+        print(f"❌ Error updating interview session: {e}")
+        return False
 
-
-# Add debugging to the answer_question endpoint
-@router.post("/{session_id}/answer", response_model=dict)
-async def answer_question(
-    session_id: str,
-    answer_data: UserAnswer,
-    current_user: str = Depends(get_current_user),
-):
-    try:
-        # Get session from Firestore
-        db = get_firestore_client()
-        session_doc = db.collection("interview_sessions").document(session_id).get()
-        
-        if not session_doc.exists:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Interview session not found"
-            )
-        
-        session_data = clean_session_data(session_doc.to_dict())
-        
-        # DEBUG: Log session state
-        print(f"DEBUG - Session state:")
-        print(f"  Current phase: {session_data.get('current_phase', 'None')}")
-        print(f"  Current question: {session_data.get('current_question', 'None')}")
-        print(f"  Phases count: {len(session_data.get('phases', []))}")
-        print(f"  Follow up depth: {session_data.get('follow_up_depth', 0)}")
-        
-        if session_data.get('phases'):
-            current_phase = session_data.get('current_phase', 0)
-            if current_phase < len(session_data['phases']):
-                phase = session_data['phases'][current_phase]
-                print(f"  Questions in current phase: {len(phase.get('questions', []))}")
-                print(f"  Current question index: {session_data.get('current_question', 0)}")
-        
-        # Verify user owns session
-        if session_data["user_id"] != current_user:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not authorized to access this session"
-            )
-        
-        # Get current question data with better error handling
-        current_question_data = interview_agent.get_current_question(session_data)
-        
-        if not current_question_data:
-            # DEBUG: More detailed error information
-            print(f"DEBUG - Failed to get current question:")
-            print(f"  Session phases: {session_data.get('phases', [])}")
-            print(f"  Current phase index: {session_data.get('current_phase', 0)}")
-            print(f"  Current question index: {session_data.get('current_question', 0)}")
-            
-            # Check if we're at the end of questions
-            current_phase = session_data.get('current_phase', 0)
-            current_question = session_data.get('current_question', 0)
-            
-            if current_phase >= len(session_data.get('phases', [])):
-                # Interview is complete
-                return {
-                    "session_id": session_id,
-                    "question": "",
-                    "is_complete": True,
-                    "message": "Interview completed successfully"
-                }
-            
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"No current question available. Phase: {current_phase}, Question: {current_question}"
-            )
-        
-        # Rest of your existing code...
-        
-    except Exception as e:
-        print(f"DEBUG - Exception in answer_question: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to process answer: {str(e)}",
-        )
-@router.get("/sessions")
-async def get_user_sessions(current_user: str = Depends(get_current_user)):
-    """
-    Get all interview sessions for the authenticated user with detailed information.
-    
-    Returns:
-        A list of session summaries including detailed progress, tier info, and timestamps.
-    """
-    try:
-        db = get_firestore_client()
-        sessions = (
-            db.collection("interview_sessions")
-            .where("user_id", "==", current_user)
-            .order_by("started_at", direction="DESCENDING")
-            .stream()
-        )
-        
-        result = []
-        for session in sessions:
-            session_data = session.to_dict()
-            
-            # Calculate progress
-            total_questions = 0
-            answered_questions = len([q for q in session_data.get("conversation", []) if q.get("field")])
-            
-            if session_data.get("phases"):
-                total_questions = len(session_data["phases"][0].get("questions", []))
-            
-            # Get tier information from conversation
-            conversation = session_data.get("conversation", [])
-            tiers_used = list(set([q.get("tier", "tier1") for q in conversation if q.get("tier")]))
-            
-            session_info = {
-                "session_id": session.id,
-                "started_at": session_data.get("started_at"),
-                "completed_at": session_data.get("completed_at"),
-                "session_metadata": {
-                    "user_id": current_user,
-                    "current_phase": session_data.get("current_phase", 0),
-                    "follow_up_depth": session_data.get("follow_up_depth", 0),
-                    "conversation_length": len(conversation),
-                    "phases_info": [
-                        {
-                            "name": phase.get("name", "Unknown"),
-                            "total_questions": len(phase.get("questions", [])),
-                            "tier_name": phase.get("tier_name", "unknown")
-                        }
-                        for phase in session_data.get("phases", [])
-                    ]
-                },
-                "tier_info": {
-                    "tiers_used": tiers_used,
-                    "primary_tier": tiers_used[0] if tiers_used else "tier1",
-                    "tier_status": "completed" if session_data.get("completed_at") else "in_progress"
-                },
-                "progress": {
-                    "phase": session_data.get("current_phase", 0),
-                    "question": session_data.get("current_question", 0),
-                    "answered": answered_questions,
-                    "total": total_questions,
-                    "percentage": round((answered_questions / total_questions) * 100, 2) if total_questions > 0 else 0,
-                    "phase_progress": f"{session_data.get('current_phase', 0) + 1}/{len(session_data.get('phases', []))}",
-                    "is_complete": session_data.get("completed_at") is not None,
-                },
-                "statistics": {
-                    "total_answers": len(conversation),
-                    "follow_up_questions": len([q for q in conversation if q.get("follow_up_depth", 0) > 0]),
-                    "fields_covered": list(set([q.get("field") for q in conversation if q.get("field")])),
-                    "average_answer_length": sum(len(q.get("answer", "").split()) for q in conversation) / len(conversation) if conversation else 0
-                }
-            }
-            
-            result.append(session_info)
-        
-        return {
-            "sessions": result,
-            "summary": {
-                "total_sessions": len(result),
-                "completed_sessions": len([s for s in result if s["progress"]["is_complete"]]),
-                "in_progress_sessions": len([s for s in result if not s["progress"]["is_complete"]]),
-                "total_questions_answered": sum(s["progress"]["answered"] for s in result)
-            }
-        }
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve sessions: {str(e)}",
-        )
-
-
-@router.get("/{session_id}")
-async def get_session_details(
-    session_id: str, current_user: str = Depends(get_current_user)
-):
-    """
-    Retrieve comprehensive information about a specific interview session.
-    
-    Args:
-        session_id (str): The session ID.
-        current_user (str): The authenticated user ID.
-        
-    Returns:
-        JSON: Complete session metadata, conversation history, and analytics.
-    """
-    try:
-        db = get_firestore_client()
-        session_doc = db.collection("interview_sessions").document(session_id).get()
-        
-        if not session_doc.exists:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Interview session not found",
-            )
-        
-        session = session_doc.to_dict()
-        
-        # Verify user owns this session
-        if session["user_id"] != current_user:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not authorized to access this session",
-            )
-        
-        conversation = session.get("conversation", [])
-        phases = session.get("phases", [])
-        
-        # Calculate detailed analytics
-        tiers_used = list(set([q.get("tier", "tier1") for q in conversation if q.get("tier")]))
-        fields_covered = list(set([q.get("field") for q in conversation if q.get("field")]))
-        
-        return {
-            "session_id": session_id,
-            "session_metadata": {
-                "user_id": session["user_id"],
-                "started_at": session.get("started_at"),
-                "completed_at": session.get("completed_at"),
-                "current_phase": session.get("current_phase"),
-                "current_question": session.get("current_question"),
-                "follow_up_depth": session.get("follow_up_depth", 0),
-                "is_complete": session.get("completed_at") is not None,
-            },
-            "tier_info": {
-                "tiers_used": tiers_used,
-                "primary_tier": tiers_used[0] if tiers_used else "tier1",
-                "tier_status": "completed" if session.get("completed_at") else "in_progress",
-                "available_tiers": list(interview_agent.tier_questions.keys())
-            },
-            "phases_info": [
-                {
-                    "name": phase.get("name", "Unknown"),
-                    "total_questions": len(phase.get("questions", [])),
-                    "tier_name": phase.get("tier_name", "unknown"),
-                    "instructions": phase.get("instructions", "")
-                }
-                for phase in phases
-            ],
-            "conversation": conversation,
-            "progress": {
-                "answered": len([q for q in conversation if q.get("field")]),
-                "total": len(phases[0].get("questions", [])) if phases else 0,
-                "percentage": round((len([q for q in conversation if q.get("field")]) / len(phases[0].get("questions", []))) * 100, 2) if phases and phases[0].get("questions") else 0,
-                "phase_progress": f"{session.get('current_phase', 0) + 1}/{len(phases)}"
-            },
-            "analytics": {
-                "total_answers": len(conversation),
-                "follow_up_questions": len([q for q in conversation if q.get("follow_up_depth", 0) > 0]),
-                "fields_covered": fields_covered,
-                "phases_covered": list(set([q.get("phase") for q in conversation if q.get("phase")])),
-                "average_answer_length": sum(len(q.get("answer", "").split()) for q in conversation) / len(conversation) if conversation else 0,
-                "session_duration": self._calculate_session_duration(session.get("started_at"), session.get("completed_at")),
-                "answer_distribution": self._get_answer_distribution(conversation)
-            }
-        }
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve session details: {str(e)}",
-        )
-
-# Add this endpoint to debug your session
-@router.get("/{session_id}/debug")
-async def debug_session(
-    session_id: str, 
+# FastAPI endpoints with USER-SPECIFIC database session management
+@router.post("/start")
+async def start_interview(
+    request: InterviewStartRequest,
     current_user: str = Depends(get_current_user)
 ):
-    """Debug endpoint to check session state"""
+    """Start a new USER-SPECIFIC tiered interview session"""
+    try:
+        settings = get_settings()
+        db = get_firestore_client()
+        
+        print(f"🚀 Starting USER-SPECIFIC interview for user: {current_user}")
+        print(f"📝 Selected category: {request.selected_category}")
+        
+        # 🔥 CRITICAL: Always pass current_user as user_id for user-specific data
+        agent = TieredInterviewAgent(db, settings.OPENAI_API_KEY, request.selected_category, current_user)
+        
+        if agent.is_complete():
+            return {
+                "success": False,
+                "message": "Interview already complete for this user",
+                "is_complete": True,
+                "user_id": current_user
+            }
+        
+        # Generate session ID
+        session_id = str(uuid.uuid4())
+        print(f"📝 Generated session ID: {session_id} for user: {current_user}")
+        
+        # 🔥 CRITICAL: Save USER-SPECIFIC session to database
+        if not save_interview_session(current_user, session_id, agent, db):
+            raise HTTPException(status_code=500, detail="Failed to save user-specific interview session")
+        
+        # Get first question
+        current_q = agent.get_current_question()
+        
+        if current_q:
+            welcome_message = f"Welcome to your personalized Prism Interview! Let's build your unique profile for {request.selected_category}."
+            question_message = f"**Tier {agent.current_tier_idx + 1} - {current_q['phase'].title()} Phase**\n\n{current_q['question']}"
+            
+            # Save conversation messages
+            save_conversation_message(
+                current_user, session_id, "assistant", welcome_message, 
+                "interview", f"Interview Session {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            )
+            save_conversation_message(
+                current_user, session_id, "assistant", question_message, "interview"
+            )
+            
+            return {
+                "success": True,
+                "session_id": session_id,
+                "user_id": current_user,
+                "current_question": current_q,
+                "progress": {
+                    "tier": f"{agent.current_tier_idx + 1}/{len(agent.tier_keys)}",
+                    "phase": agent.current_phase.title(),
+                    "category": request.selected_category
+                },
+                "user_specific": True,
+                "database_saved": True,
+                "source": "user_specific_database",
+                "messages": [
+                    {"role": "assistant", "content": welcome_message},
+                    {"role": "assistant", "content": question_message}
+                ]
+            }
+        else:
+            return {
+                "success": False,
+                "message": "No questions found for this user and category",
+                "is_complete": True,
+                "user_id": current_user
+            }
+            
+    except Exception as e:
+        print(f"❌ Error in start_interview for user {current_user}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start user-specific interview: {str(e)}")
+
+@router.post("/answer")
+async def submit_answer(
+    request: InterviewAnswerRequest,
+    current_user: str = Depends(get_current_user)
+):
+    """Submit an answer to the current interview question - USER-SPECIFIC"""
     try:
         db = get_firestore_client()
-        session_doc = db.collection("interview_sessions").document(session_id).get()
         
+        print(f"📝 Submitting answer for session: {request.session_id} (user: {current_user})")
+        
+        # 🔥 Load USER-SPECIFIC session from database
+        agent = load_interview_session(request.session_id, db)
+        
+        if not agent:
+            raise HTTPException(status_code=404, detail="Interview session not found in database")
+        
+        # Verify user owns this session
+        session_doc = db.collection("interview_sessions").document(request.session_id).get()
+        if not session_doc.exists or session_doc.to_dict().get("user_id") != current_user:
+            raise HTTPException(status_code=403, detail="Not authorized to access this session")
+        
+        # Verify agent belongs to current user
+        if agent.user_id != current_user:
+            raise HTTPException(status_code=403, detail="Session does not belong to current user")
+        
+        # Get current question for context
+        current_q = agent.get_current_question()
+        if not current_q:
+            return {
+                "success": False,
+                "message": "No current question available",
+                "is_complete": agent.is_complete(),
+                "user_id": current_user
+            }
+        
+        # Save user message to conversation history
+        save_conversation_message(
+            current_user, request.session_id, "user", request.answer, "interview"
+        )
+        
+        # Submit answer to USER-SPECIFIC agent
+        success = agent.submit_answer(request.answer)
+        
+        if success:
+            # Save updates to USER-SPECIFIC Firestore collections
+            if agent.save_to_firestore():
+                # 🔥 CRITICAL: Update USER-SPECIFIC session in database
+                update_interview_session(request.session_id, agent, db)
+                
+                # Check if interview is complete
+                if agent.is_complete():
+                    completion_message = f"🎉 **Congratulations {current_user}!** You have completed your personalized tiered interview. Your unique profile has been saved successfully!"
+                    
+                    # Save completion message
+                    save_conversation_message(
+                        current_user, request.session_id, "assistant", completion_message, "interview"
+                    )
+                    
+                    # Mark session as completed in database
+                    db.collection("interview_sessions").document(request.session_id).update({
+                        "status": "completed",
+                        "completed_at": datetime.utcnow()
+                    })
+                    
+                    return {
+                        "success": True,
+                        "is_complete": True,
+                        "message": completion_message,
+                        "database_updated": True,
+                        "source": "user_specific_database",
+                        "user_id": current_user
+                    }
+                else:
+                    # Get next question
+                    next_q = agent.get_current_question()
+                    if next_q:
+                        phase_info = f"**Tier {agent.current_tier_idx + 1} - {next_q['phase'].title()} Phase**"
+                        
+                        # Regenerate question with motivation
+                        motivated_question = agent.regenerate_question_with_motivation(
+                            next_q['question'], 
+                            request.answer
+                        )
+                        
+                        next_message = f"{phase_info}\n\n{motivated_question}"
+                        
+                        # Save assistant message
+                        save_conversation_message(
+                            current_user, request.session_id, "assistant", next_message, "interview"
+                        )
+                        
+                        return {
+                            "success": True,
+                            "is_complete": False,
+                            "current_question": next_q,
+                            "progress": {
+                                "tier": f"{agent.current_tier_idx + 1}/{len(agent.tier_keys)}",
+                                "phase": agent.current_phase.title(),
+                                "category": agent.selected_category
+                            },
+                            "database_updated": True,
+                            "source": "user_specific_database",
+                            "user_id": current_user,
+                            "messages": [{"role": "assistant", "content": next_message}]
+                        }
+                    else:
+                        return {
+                            "success": False,
+                            "message": "⚠️ No more questions available.",
+                            "is_complete": True,
+                            "user_id": current_user
+                        }
+            else:
+                return {
+                    "success": False,
+                    "message": "❌ Failed to save your response. Please try again.",
+                    "user_id": current_user
+                }
+        else:
+            return {
+                "success": False,
+                "message": "❌ Failed to process your answer. Please try again.",
+                "user_id": current_user
+            }
+            
+    except Exception as e:
+        print(f"❌ Error in submit_answer for user {current_user}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to submit answer: {str(e)}")
+
+@router.get("/status/{session_id}")
+async def get_interview_status(
+    session_id: str,
+    current_user: str = Depends(get_current_user)
+) -> InterviewStatusResponse:
+    """Get current interview status - USER-SPECIFIC"""
+    try:
+        db = get_firestore_client()
+        
+        print(f"🔍 Getting status for session: {session_id} (user: {current_user})")
+        
+        # 🔥 Load USER-SPECIFIC session from database
+        agent = load_interview_session(session_id, db)
+        
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Interview session {session_id} not found in database")
+        
+        # Verify user owns this session
+        session_doc = db.collection("interview_sessions").document(session_id).get()
+        if not session_doc.exists or session_doc.to_dict().get("user_id") != current_user:
+            raise HTTPException(status_code=403, detail="Not authorized to access this session")
+        
+        # Verify agent belongs to current user
+        if agent.user_id != current_user:
+            raise HTTPException(status_code=403, detail="Session does not belong to current user")
+        
+        current_q = agent.get_current_question()
+        
+        return InterviewStatusResponse(
+            session_id=session_id,
+            is_complete=agent.is_complete(),
+            current_tier_idx=agent.current_tier_idx,
+            current_phase=agent.current_phase,
+            current_question=current_q,
+            progress={
+                "tier": f"{agent.current_tier_idx + 1}/{len(agent.tier_keys)}",
+                "phase": agent.current_phase.title(),
+                "tier_name": agent.get_current_tier_key(),
+                "source": "user_specific_database",
+                "user_id": current_user,
+                "category": agent.selected_category
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in get_interview_status for user {current_user}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get interview status: {str(e)}")
+
+@router.get("/sessions")
+async def list_user_sessions(current_user: str = Depends(get_current_user)):
+    """List all USER-SPECIFIC interview sessions for the current user"""
+    try:
+        db = get_firestore_client()
+        
+        print(f"📋 Listing USER-SPECIFIC sessions for user: {current_user}")
+        
+        # 🔥 Get USER-SPECIFIC sessions from database
+        sessions_ref = db.collection("interview_sessions").where("user_id", "==", current_user)
+        sessions = sessions_ref.order_by("created_at", direction="DESCENDING").stream()
+        
+        user_sessions = []
+        for session_doc in sessions:
+            session_data = session_doc.to_dict()
+            agent_state = session_data.get("agent_state", {})
+            
+            user_sessions.append({
+                "session_id": session_data["session_id"],
+                "user_id": session_data["user_id"],
+                "created_at": session_data["created_at"].isoformat() if hasattr(session_data["created_at"], 'isoformat') else str(session_data["created_at"]),
+                "updated_at": session_data["updated_at"].isoformat() if hasattr(session_data["updated_at"], 'isoformat') else str(session_data["updated_at"]),
+                "status": session_data.get("status", "unknown"),
+                "is_complete": session_data.get("status") == "completed",
+                "current_tier": agent_state.get("current_tier_idx", 0) + 1,
+                "total_tiers": len(agent_state.get("tier_keys", [])),
+                "current_phase": agent_state.get("current_phase", "unknown"),
+                "is_active": session_data.get("is_active", False),
+                "selected_category": agent_state.get("selected_category", "Movies"),
+                "questions_answered": len(agent_state.get("conversation", [])),
+                "user_specific": True
+            })
+        
+        print(f"✅ Found {len(user_sessions)} USER-SPECIFIC sessions for user {current_user}")
+        
+        return {
+            "sessions": user_sessions,
+            "total_sessions": len(user_sessions),
+            "source": "user_specific_database",
+            "storage_type": "firestore_user_specific",
+            "user_id": current_user
+        }
+        
+    except Exception as e:
+        print(f"❌ Error listing sessions for user {current_user}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list sessions: {str(e)}")
+
+@router.get("/profile")
+async def get_user_profile(current_user: str = Depends(get_current_user)):
+    """Get USER-SPECIFIC profile"""
+    try:
+        db = get_firestore_client()
+        
+        # Load user-specific profile
+        profile_doc_id = f"{current_user}_profile_structure.json"
+        profile_doc = db.collection("user_profiles").document(profile_doc_id).get()
+        
+        if not profile_doc.exists:
+            return {
+                "success": False,
+                "message": "No profile found for this user. Please complete an interview first.",
+                "user_id": current_user
+            }
+        
+        profile_data = profile_doc.to_dict()
+        
+        return {
+            "success": True,
+            "profile": profile_data,
+            "user_id": current_user,
+            "profile_type": "user_specific"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load user profile: {str(e)}")
+
+@router.get("/profile/progress")
+async def get_user_profile_progress(current_user: str = Depends(get_current_user)):
+    """Get USER-SPECIFIC profile completion progress"""
+    try:
+        db = get_firestore_client()
+        
+        # Check user's question progress
+        general_doc = db.collection("user_questions").document(f"{current_user}_general_questions.json").get()
+        category_doc = db.collection("user_questions").document(f"{current_user}_category_questions.json").get()
+        
+        progress = {
+            "user_id": current_user,
+            "general_questions": {"completed": 0, "total": 0},
+            "category_questions": {"completed": 0, "total": 0},
+            "overall_completion": 0,
+            "tiers_completed": 0,
+            "total_tiers": 0
+        }
+        
+        # Calculate general questions progress
+        if general_doc.exists:
+            general_data = general_doc.to_dict()
+            for tier_key, tier_data in general_data.items():
+                if tier_key.startswith('tier') and isinstance(tier_data, dict):
+                    progress["total_tiers"] += 1
+                    if tier_data.get('status') == 'completed':
+                        progress["tiers_completed"] += 1
+                    
+                    questions = tier_data.get('questions', [])
+                    progress["general_questions"]["total"] += len(questions)
+                    progress["general_questions"]["completed"] += len([q for q in questions if q.get('qest') == 'answered'])
+        
+        # Calculate category questions progress
+        if category_doc.exists:
+            category_data = category_doc.to_dict()
+            for tier_key, tier_data in category_data.items():
+                if tier_key.startswith('tier') and isinstance(tier_data, dict):
+                    questions = tier_data.get('questions', [])
+                    progress["category_questions"]["total"] += len(questions)
+                    progress["category_questions"]["completed"] += len([q for q in questions if q.get('qest') == 'answered'])
+        
+        # Calculate overall completion
+        total_questions = progress["general_questions"]["total"] + progress["category_questions"]["total"]
+        total_completed = progress["general_questions"]["completed"] + progress["category_questions"]["completed"]
+        
+        if total_questions > 0:
+            progress["overall_completion"] = round((total_completed / total_questions) * 100, 2)
+        
+        return {
+            "success": True,
+            "progress": progress,
+            "user_specific": True
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get user progress: {str(e)}")
+
+@router.delete("/profile/reset")
+async def reset_user_profile(current_user: str = Depends(get_current_user)):
+    """Reset USER-SPECIFIC profile and questions"""
+    try:
+        db = get_firestore_client()
+        
+        # Delete user-specific documents
+        documents_to_delete = [
+            ("user_profiles", f"{current_user}_profile_structure.json"),
+            ("user_questions", f"{current_user}_general_questions.json"),
+            ("user_questions", f"{current_user}_category_questions.json")
+        ]
+        
+        deleted_count = 0
+        for collection, doc_id in documents_to_delete:
+            try:
+                doc_ref = db.collection(collection).document(doc_id)
+                if doc_ref.get().exists:
+                    doc_ref.delete()
+                    deleted_count += 1
+                    print(f"✅ Deleted {collection}/{doc_id}")
+            except Exception as e:
+                print(f"❌ Error deleting {collection}/{doc_id}: {e}")
+        
+        # Also mark user's interview sessions as reset
+        sessions_ref = db.collection("interview_sessions").where("user_id", "==", current_user)
+        reset_sessions = 0
+        for session in sessions_ref.stream():
+            session.reference.update({
+                "is_active": False,
+                "status": "reset",
+                "reset_at": datetime.utcnow()
+            })
+            reset_sessions += 1
+        
+        # Delete user index
+        try:
+            user_index_ref = db.collection("user_interview_index").document(current_user)
+            if user_index_ref.get().exists:
+                user_index_ref.delete()
+                print(f"✅ Deleted user index for {current_user}")
+        except Exception as e:
+            print(f"❌ Error deleting user index: {e}")
+        
+        return {
+            "success": True,
+            "message": f"User profile reset successfully. Deleted {deleted_count} documents and reset {reset_sessions} sessions.",
+            "user_id": current_user,
+            "deleted_documents": deleted_count,
+            "reset_sessions": reset_sessions
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to reset user profile: {str(e)}")
+
+@router.delete("/sessions/{session_id}")
+async def delete_interview_session(
+    session_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """Delete a USER-SPECIFIC interview session from database"""
+    try:
+        db = get_firestore_client()
+        
+        # Verify user owns this session
+        session_doc = db.collection("interview_sessions").document(session_id).get()
         if not session_doc.exists:
-            return {"error": "Session not found"}
+            raise HTTPException(status_code=404, detail="Interview session not found")
         
         session_data = session_doc.to_dict()
+        if session_data.get("user_id") != current_user:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this session")
         
-        # Return complete session data for debugging
+        # Soft delete
+        db.collection("interview_sessions").document(session_id).update({
+            "is_active": False,
+            "deleted_at": datetime.utcnow(),
+            "status": "deleted"
+        })
+        
+        # Update user index
+        try:
+            db.collection("user_interview_index").document(current_user).collection("sessions").document(session_id).update({
+                "status": "deleted",
+                "deleted_at": datetime.utcnow()
+            })
+        except Exception as e:
+            print(f"❌ Error updating user index: {e}")
+        
         return {
-            "session_id": session_id,
-            "raw_session_data": session_data,
-            "analysis": {
-                "current_phase": session_data.get('current_phase'),
-                "current_question": session_data.get('current_question'),
-                "phases_count": len(session_data.get('phases', [])),
-                "conversation_length": len(session_data.get('conversation', [])),
-                "follow_up_depth": session_data.get('follow_up_depth', 0),
-                "has_phases": bool(session_data.get('phases')),
-                "phase_0_questions": len(session_data.get('phases', [{}])[0].get('questions', [])) if session_data.get('phases') else 0,
-                "is_complete": session_data.get('completed_at') is not None
+            "success": True,
+            "message": f"Interview session {session_id} deleted successfully",
+            "source": "user_specific_database",
+            "user_id": current_user
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete session: {str(e)}")
+
+# Debug endpoints to verify database operations
+@router.get("/debug/database")
+async def debug_database_connection(current_user: str = Depends(get_current_user)):
+    """Debug endpoint to test USER-SPECIFIC database connectivity"""
+    try:
+        db = get_firestore_client()
+        
+        # Test database write
+        test_doc_ref = db.collection("debug_test").document(f"test_{current_user}")
+        test_data = {
+            "user_id": current_user,
+            "timestamp": datetime.utcnow(),
+            "test": "user_specific_database_connectivity"
+        }
+        test_doc_ref.set(test_data)
+        
+        # Test database read
+        test_doc = test_doc_ref.get()
+        
+        if test_doc.exists:
+            # Clean up test document
+            test_doc_ref.delete()
+            
+            return {
+                "success": True,
+                "message": "User-specific database connection successful",
+                "firestore_connected": True,
+                "can_write": True,
+                "can_read": True,
+                "storage_type": "user_specific_database",
+                "user_id": current_user
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Database read failed",
+                "firestore_connected": True,
+                "can_write": True,
+                "can_read": False,
+                "user_id": current_user
+            }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Database connection failed: {str(e)}",
+            "firestore_connected": False,
+            "error": str(e),
+            "user_id": current_user
+        }
+
+@router.get("/debug/user-data")
+async def debug_user_data(current_user: str = Depends(get_current_user)):
+    """Debug endpoint to check USER-SPECIFIC data in database"""
+    try:
+        db = get_firestore_client()
+        
+        data_check = {
+            "user_id": current_user,
+            "profile_exists": False,
+            "general_questions_exist": False,
+            "category_questions_exist": False,
+            "sessions_count": 0,
+            "user_index_exists": False
+        }
+        
+        # Check user profile
+        profile_doc = db.collection("user_profiles").document(f"{current_user}_profile_structure.json").get()
+        data_check["profile_exists"] = profile_doc.exists
+        
+        # Check user questions
+        general_doc = db.collection("user_questions").document(f"{current_user}_general_questions.json").get()
+        data_check["general_questions_exist"] = general_doc.exists
+        
+        category_doc = db.collection("user_questions").document(f"{current_user}_category_questions.json").get()
+        data_check["category_questions_exist"] = category_doc.exists
+        
+        # Check sessions
+        sessions_ref = db.collection("interview_sessions").where("user_id", "==", current_user)
+        sessions_count = len(list(sessions_ref.stream()))
+        data_check["sessions_count"] = sessions_count
+        
+        # Check user index
+        user_index_doc = db.collection("user_interview_index").document(current_user).get()
+        data_check["user_index_exists"] = user_index_doc.exists
+        
+        return {
+            "success": True,
+            "data_check": data_check
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "user_id": current_user
+        }
+
+# 🔥 DEBUG ENDPOINTS FOR AUTHENTICATION TESTING
+@router.get("/debug/auth")
+async def debug_authentication(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """Debug endpoint to test authentication"""
+    try:
+        from app.core.security import debug_token_verification
+        
+        print(f"🔍 DEBUG AUTH ENDPOINT:")
+        print(f"  Credentials: {credentials}")
+        print(f"  Scheme: {credentials.scheme}")
+        print(f"  Token: {credentials.credentials[:50]}..." if credentials.credentials else "None")
+        
+        # Manual token verification
+        result = debug_token_verification(credentials.credentials)
+        
+        return {
+            "success": True,
+            "debug_info": {
+                "scheme": credentials.scheme,
+                "token_prefix": credentials.credentials[:50] if credentials.credentials else None,
+                "token_length": len(credentials.credentials) if credentials.credentials else 0,
+                "verification_result": result
             }
         }
         
     except Exception as e:
-        return {"error": f"Debug failed: {str(e)}"}
-    
-@router.get("/questions/pending")
-async def get_pending_questions(
-    current_user: str = Depends(get_current_user),
-    tier: str = "tier1"
-):
-    """
-    Get all pending questions for a specific tier with comprehensive details.
-    
-    Args:
-        current_user (str): The authenticated user ID.
-        tier (str): The tier name (default: "tier1").
-        
-    Returns:
-        JSON: Detailed list of pending questions with tier information.
-    """
+        return {
+            "success": False,
+            "error": str(e),
+            "debug_info": {
+                "credentials_received": bool(credentials),
+                "scheme": getattr(credentials, 'scheme', None),
+                "has_token": bool(getattr(credentials, 'credentials', None))
+            }
+        }
+
+@router.get("/debug/auth-simple")
+async def debug_auth_simple():
+    """Simple debug endpoint without authentication"""
     try:
-        pending_questions = interview_agent.get_pending_questions_by_field(tier)
-        
-        # Get tier information
-        tier_data = interview_agent.tier_questions.get(tier, {})
-        all_questions = tier_data.get("questions", [])
-        
-        # Calculate statistics
-        total_questions = len(all_questions)
-        answered_questions = len([q for q in all_questions if q.get("qest") == "answered"])
-        pending_count = len(pending_questions)
+        from app.core.config import get_settings
+        settings = get_settings()
         
         return {
-            "tier": tier,
-            "tier_info": {
-                "status": tier_data.get("status", "unknown"),
-                "description": tier_data.get("description", ""),
-                "priority": tier_data.get("priority", 1),
-                "category": tier_data.get("category", "general")
-            },
-            "statistics": {
-                "total_questions": total_questions,
-                "answered_questions": answered_questions,
-                "pending_questions": pending_count,
-                "completion_percentage": round((answered_questions / total_questions) * 100, 2) if total_questions > 0 else 0
-            },
-            "pending_questions": [
-                {
-                    "question": q.get("question"),
-                    "field": q.get("field"),
-                    "type": q.get("type", "text"),
-                    "category": q.get("category", "general"),
-                    "priority": q.get("priority", 1),
-                    "expected_answer_type": q.get("expected_answer_type", "text"),
-                    "hints": q.get("hints", []),
-                    "validation_rules": q.get("validation_rules", {}),
-                    "question_id": q.get("id", ""),
-                    "status": q.get("qest", "pending")
-                }
-                for q in pending_questions
-            ],
-            "available_tiers": list(interview_agent.tier_questions.keys()),
-            "total_tiers": len(interview_agent.tier_questions)
+            "success": True,
+            "config_info": {
+                "secret_key_exists": bool(settings.SECRET_KEY),
+                "secret_key_length": len(settings.SECRET_KEY) if settings.SECRET_KEY else 0,
+                "access_token_expire_minutes": settings.ACCESS_TOKEN_EXPIRE_MINUTES
+            }
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@router.post("/debug/test-token")
+async def test_token_manually(token_data: dict):
+    """Test a token manually by passing it in the request body"""
+    try:
+        from app.core.security import debug_token_verification
+        
+        token = token_data.get("token")
+        if not token:
+            return {"success": False, "error": "No token provided"}
+        
+        result = debug_token_verification(token)
+        
+        return {
+            "success": True,
+            "token_test_result": result
         }
         
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve pending questions: {str(e)}",
-        )
+        return {
+            "success": False,
+            "error": str(e)
+        }
+# Replace the list_user_sessions function in interview.py with this version:
 
-
-# Helper methods for analytics
-def _calculate_session_duration(started_at, completed_at):
-    """Calculate session duration in minutes"""
-    if not started_at or not completed_at:
-        return None
-    
+@router.get("/sessions")
+async def list_user_sessions(current_user: str = Depends(get_current_user)):
+    """List all USER-SPECIFIC interview sessions for the current user - Fixed Version"""
     try:
-        if isinstance(started_at, str):
-            started_at = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
-        if isinstance(completed_at, str):
-            completed_at = datetime.fromisoformat(completed_at.replace('Z', '+00:00'))
+        db = get_firestore_client()
         
-        duration = completed_at - started_at
-        return round(duration.total_seconds() / 60, 2)
-    except Exception:
-        return None
+        print(f"📋 Listing USER-SPECIFIC sessions for user: {current_user}")
+        
+        # 🔥 TEMPORARY FIX: Get sessions without ordering first
+        sessions_ref = db.collection("interview_sessions").where("user_id", "==", current_user)
+        sessions_docs = list(sessions_ref.stream())
+        
+        # Sort in Python instead of Firestore
+        sessions_list = []
+        for session_doc in sessions_docs:
+            session_data = session_doc.to_dict()
+            sessions_list.append(session_data)
+        
+        # Sort by created_at in descending order (most recent first)
+        sessions_list.sort(key=lambda x: x.get("created_at", datetime.min), reverse=True)
+        
+        user_sessions = []
+        for session_data in sessions_list:
+            agent_state = session_data.get("agent_state", {})
+            
+            user_sessions.append({
+                "session_id": session_data["session_id"],
+                "user_id": session_data["user_id"],
+                "created_at": session_data["created_at"].isoformat() if hasattr(session_data["created_at"], 'isoformat') else str(session_data["created_at"]),
+                "updated_at": session_data["updated_at"].isoformat() if hasattr(session_data["updated_at"], 'isoformat') else str(session_data["updated_at"]),
+                "status": session_data.get("status", "unknown"),
+                "is_complete": session_data.get("status") == "completed",
+                "current_tier": agent_state.get("current_tier_idx", 0) + 1,
+                "total_tiers": len(agent_state.get("tier_keys", [])),
+                "current_phase": agent_state.get("current_phase", "unknown"),
+                "is_active": session_data.get("is_active", False),
+                "selected_category": agent_state.get("selected_category", "Movies"),
+                "questions_answered": len(agent_state.get("conversation", [])),
+                "user_specific": True
+            })
+        
+        print(f"✅ Found {len(user_sessions)} USER-SPECIFIC sessions for user {current_user}")
+        
+        return {
+            "sessions": user_sessions,
+            "total_sessions": len(user_sessions),
+            "source": "user_specific_database",
+            "storage_type": "firestore_user_specific",
+            "user_id": current_user,
+            "index_status": "sorting_in_python"
+        }
+        
+    except Exception as e:
+        print(f"❌ Error listing sessions for user {current_user}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list sessions: {str(e)}")
 
-
-def _get_answer_distribution(conversation):
-    """Get distribution of answers by field/category"""
-    distribution = {}
-    for item in conversation:
-        field = item.get("field", "unknown")
-        if field in distribution:
-            distribution[field] += 1
-        else:
-            distribution[field] = 1
-    return distribution
-
+# Alternative: Use user index collection instead
+@router.get("/sessions-alt")
+async def list_user_sessions_alternative(current_user: str = Depends(get_current_user)):
+    """Alternative: Use user index collection for faster queries"""
+    try:
+        db = get_firestore_client()
+        
+        print(f"📋 Listing sessions using user index for: {current_user}")
+        
+        # Use the user index collection instead
+        user_index_ref = db.collection("user_interview_index").document(current_user).collection("sessions")
+        session_refs = list(user_index_ref.stream())
+        
+        user_sessions = []
+        for session_ref in session_refs:
+            session_index_data = session_ref.to_dict()
+            session_id = session_index_data.get("session_id")
+            
+            if session_id:
+                # Get full session data
+                session_doc = db.collection("interview_sessions").document(session_id).get()
+                if session_doc.exists:
+                    session_data = session_doc.to_dict()
+                    agent_state = session_data.get("agent_state", {})
+                    
+                    user_sessions.append({
+                        "session_id": session_data["session_id"],
+                        "user_id": session_data["user_id"],
+                        "created_at": session_data["created_at"].isoformat() if hasattr(session_data["created_at"], 'isoformat') else str(session_data["created_at"]),
+                        "updated_at": session_data["updated_at"].isoformat() if hasattr(session_data["updated_at"], 'isoformat') else str(session_data["updated_at"]),
+                        "status": session_data.get("status", "unknown"),
+                        "is_complete": session_data.get("status") == "completed",
+                        "current_tier": agent_state.get("current_tier_idx", 0) + 1,
+                        "total_tiers": len(agent_state.get("tier_keys", [])),
+                        "current_phase": agent_state.get("current_phase", "unknown"),
+                        "is_active": session_data.get("is_active", False),
+                        "selected_category": agent_state.get("selected_category", "Movies"),
+                        "questions_answered": len(agent_state.get("conversation", [])),
+                        "user_specific": True
+                    })
+        
+        # Sort by created_at
+        user_sessions.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        
+        return {
+            "sessions": user_sessions,
+            "total_sessions": len(user_sessions),
+            "source": "user_index_collection",
+            "storage_type": "firestore_user_index",
+            "user_id": current_user
+        }
+        
+    except Exception as e:
+        print(f"❌ Error listing sessions for user {current_user}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list sessions: {str(e)}")  

@@ -32,11 +32,11 @@ class UserAnswer(BaseModel):
     answer: str
 
 class RecommendationQuery(BaseModel):
-    category: str
+    category: Optional[str] = None
     query: str
 
 class Recommendation(BaseModel):
     title: str
-    description: str
-    reasons: List[str]
-    category: str
+    description: Optional[str] = None
+    reasons: Optional[List[str]] = None
+    category: Optional[str] = None
