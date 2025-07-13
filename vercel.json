@@ -1,16 +1,72 @@
-{
-    "version": 2,
-    "builds": [
-      {
-        "src": "app/main.py",
-        "use": "@vercel/python"
-      }
-    ],
-    "routes": [
-      {
-        "src": "/(.*)",
-        "dest": "app/main.py"
-      }
-    ]
+// {
+//     "version": 2,
+//     "builds": [
+//       {
+//         "src": "app/main.py",
+//         "use": "@vercel/python"
+//       }
+//     ],
+//     "routes": [
+//       {
+//         "src": "/(.*)",
+//         "dest": "app/main.py"
+//       }
+//     ]
     
-  }
+//   }
+{
+  "version": 2,
+  "framework": null,
+  "builds": [
+    {
+      "src": "app/main.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "main.py"
+    }
+  ],
+  "functions": {
+    "main.py": {
+      "maxDuration": 30,
+      "memory": 1024
+    }
+  },
+  "excludeFiles": [
+    "**/.git/**",
+    "**/node_modules/**",
+    "**/.next/**",
+    "**/.vercel/**",
+    "**/venv/**",
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "**/tests/**",
+    "**/test_*",
+    "**/*_test.py",
+    "**/docs/**",
+    "**/*.md",
+    "**/.env*",
+    "**/README*",
+    "**/.gitignore",
+    "**/setup.py",
+    "**/pyproject.toml",
+    "**/*.log",
+    "**/logs/**",
+    "**/tmp/**",
+    "**/temp/**",
+    "**/.DS_Store",
+    "**/Thumbs.db",
+    "**/*.orig",
+    "**/.coverage",
+    "**/htmlcov/**",
+    "**/.mypy_cache/**",
+    "**/.ruff_cache/**",
+    "**/jupyter/**",
+    "**/*.ipynb",
+    "**/examples/**",
+    "**/sample_data/**"
+  ]
+}
