@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routers import auth, interview, recommendations, questions, profiles, conversations
 from app.core.firebase import initialize_firebase
 from app.core.config import get_settings
-
+from mangum import Mangum
 # Initialize settings
 settings = get_settings()
 
