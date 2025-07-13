@@ -1,3 +1,4 @@
+
 FastAPI Setup and Execution Steps
 Now that we've created the API code, let's go through the steps to set up and run the FastAPI application:
 Step 1: Create the Project Structure
