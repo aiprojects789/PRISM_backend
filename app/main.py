@@ -55,7 +55,7 @@ async def root():
             "health": "/health"
         }
     }
-
+handler = Mangum(app)
 @app.get("/health")
 async def health_check():
     return {
